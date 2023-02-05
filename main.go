@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log"
-	"os"
-	"strings"
-
+	"github.com/a-pavithraa/lambda-deploy/common"
+	"github.com/a-pavithraa/lambda-deploy/iam"
 	"github.com/a-pavithraa/lambda-deploy/lambda"
 	"github.com/urfave/cli/v2"
 	"github.com/urfave/cli/v2/altsrc"
+	"log"
+	"os"
 )
 
 func main() {
@@ -33,6 +32,14 @@ func main() {
 				Aliases: []string{"p"},
 				Value:   "",
 				Usage:   "Execution policy of Lambda",
+			},
+		),
+		altsrc.NewBoolFlag(
+			&cli.BoolFlag{
+				Name:    "autogenerate_execution_policy",
+				Aliases: []string{"dep"},
+				Value:   false,
+				Usage:   "Autogenerate default execution policy",
 			},
 		),
 
@@ -111,60 +118,32 @@ func main() {
 	}
 	commands := []*cli.Command{
 		{
-			Name:    "create_lambda",
+			Name:    "upsert_lambda",
 			Before:  altsrc.InitInputSourceWithContext(flags, altsrc.NewYamlSourceFromFlagFunc("config")),
-			Aliases: []string{"cl"},
+			Aliases: []string{"ul"},
 			Flags:   flags,
-			Usage:   "Creates a Lambda",
+			Usage:   "Creates or Updates a Lambda",
 
-			Action: func(cCtx *cli.Context) error {
-				lambdaParams := lambda.DeployParams{
-					FunctionName: cCtx.String("name"),
-					Policy:       cCtx.String("policy"),
-					Runtime:      cCtx.String("runtime"),
-					BucketName:   cCtx.String("s3_bucket"),
-					KeyName:      cCtx.String("s3_key"),
-					Region:       cCtx.String("region"),
-					ZipFile:      cCtx.String("zip_file"),
-					Memory:       cCtx.Int("memory"),
-					HandlerName:  cCtx.String("handler_name"),
+			Action: UpsertLambda,
+		},
 
-					Action: cCtx.String("action_type"),
-				}
-				str := strings.TrimSpace(cCtx.String("environment_variables"))
-
-				if len(str) > 0 {
-					result := make(map[string]string)
-					if err := json.Unmarshal([]byte(str), &result); err != nil {
-						fmt.Println(err)
-						return err
-					}
-					lambdaParams.EnvironmentVariables = result
-
-				}
-
-				//fmt.Println(lambdaParams)
-				lambdaWrapper := lambda.ServiceWrapper{
-					Client: lambda.Client(context.Background()),
-				}
-				alreadyExists, err := lambdaWrapper.DoesExist(context.Background(), lambdaParams.FunctionName)
-				fmt.Println("alreadyExists==", alreadyExists)
-				err = lambda.ValidateInputParamsForCreate(lambdaParams)
-				if err != nil {
-					fmt.Println(err)
-					log.Fatal(err)
-
-				}
-				if !alreadyExists {
-					lambdaWrapper.New(context.Background(), lambdaParams)
-
-				}
-				if err != nil {
-					fmt.Println(err)
-					log.Fatal(err)
-				}
-				return nil
+		{
+			Name:    "delete_lambda",
+			Aliases: []string{"dl"},
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "name",
+					Usage: "Name of the Lambda function",
+				},
+				&cli.StringFlag{
+					Name:        "delete_role",
+					Usage:       "Flag to indicate whether role and policy should also be deleted - Possible values Y and N",
+					DefaultText: "N",
+				},
 			},
+			Usage: "Deletes a Lambda",
+
+			Action: DeleteLambda,
 		},
 	}
 
@@ -173,6 +152,118 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+
+		log.Fatalf("Not able to run the command . The reason is %s", err.Error())
 	}
+}
+
+func UpsertLambda(cCtx *cli.Context) error {
+
+	lambdaParams, err2 := SetLambdaParams(cCtx)
+	if err2 != nil {
+		return err2
+	}
+
+	//fmt.Println(lambdaParams)
+	lambdaWrapper := lambda.ServiceWrapper{
+		Client: lambda.Client(context.Background()),
+	}
+	iamWrapper := iam.ServiceWrapper{
+		IamClient: iam.Client(context.Background()),
+	}
+	functionDetails, err := lambdaWrapper.GetFunctionDetails(context.Background(), lambdaParams.FunctionName)
+	if err != nil {
+		log.Println(err)
+		return err
+
+	}
+
+	if functionDetails == nil {
+		err = lambda.ValidateInputParams(*lambdaParams, true)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		_, err := lambdaWrapper.New(context.Background(), *lambdaParams, iamWrapper)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+
+	} else {
+		err = lambda.ValidateInputParams(*lambdaParams, false)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		err := lambdaWrapper.UpdateFunction(context.Background(), *lambdaParams)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+
+	}
+
+	return nil
+
+}
+
+func SetLambdaParams(cCtx *cli.Context) (*lambda.DeployParams, error) {
+	lambdaParams := lambda.DeployParams{
+		FunctionName:                cCtx.String("name"),
+		Policy:                      cCtx.String("policy"),
+		Runtime:                     cCtx.String("runtime"),
+		BucketName:                  cCtx.String("s3_bucket"),
+		KeyName:                     cCtx.String("s3_key"),
+		Region:                      cCtx.String("region"),
+		ZipFile:                     cCtx.String("zip_file"),
+		Memory:                      cCtx.Int("memory"),
+		HandlerName:                 cCtx.String("handler_name"),
+		AutogenerateExecutionPolicy: cCtx.Bool("autogenerate_execution_policy"),
+		Action:                      cCtx.String("action_type"),
+	}
+	envVariables := cCtx.String("environment_variables")
+
+	if common.TrimAndCheckEmptyString(&envVariables) {
+		result := make(map[string]string)
+		if err := json.Unmarshal([]byte(envVariables), &result); err != nil {
+			log.Println(err)
+			return nil, err
+		}
+		lambdaParams.EnvironmentVariables = result
+
+	}
+	return &lambdaParams, nil
+}
+
+func DeleteLambda(cCtx *cli.Context) error {
+	name := cCtx.String("name")
+	deleteRole := cCtx.String("delete_role")
+	log.Println("Deleting Lambda-----", name)
+	if common.TrimAndCheckEmptyString(&name) {
+		return &common.InputError{
+			Message: "Function Name cannot be null",
+		}
+
+	}
+	lambdaWrapper := lambda.ServiceWrapper{
+		Client: lambda.Client(context.Background()),
+	}
+	functionDetails, err := lambdaWrapper.Delete(context.Background(), name)
+	if err != nil {
+
+		return err
+	}
+	if common.TrimAndCheckEmptyString(&deleteRole) {
+		if deleteRole == "Y" {
+			iamWrapper := iam.ServiceWrapper{
+				IamClient: iam.Client(context.Background()),
+			}
+			iamWrapper.DeleteRole(context.Background(), *functionDetails.Configuration.Role)
+
+		}
+
+	}
+	return nil
+
 }

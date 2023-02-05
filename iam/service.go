@@ -3,7 +3,7 @@ package iam
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"github.com/a-pavithraa/lambda-deploy/lambda"
 	"log"
 	"strings"
 
@@ -13,22 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
 
-type ServiceWrapper struct {
-	IamClient *iam.Client
-}
-type PolicyDocument struct {
-	Version   string
-	Statement []PolicyStatement
-}
-
-// PolicyStatement defines a statement in a policy document.
-type PolicyStatement struct {
-	Effect    string
-	Action    []string
-	Principal map[string]string `json:",omitempty"`
-	Resource  *string           `json:",omitempty"`
-}
-
 func (wrapper ServiceWrapper) validatePolicy(lambdaExecutionRolePolicy string) error {
 	lambdaBasicRole := PolicyDocument{}
 	if err := json.Unmarshal([]byte(lambdaExecutionRolePolicy), &lambdaBasicRole); err != nil {
@@ -36,6 +20,13 @@ func (wrapper ServiceWrapper) validatePolicy(lambdaExecutionRolePolicy string) e
 
 	}
 	return nil
+}
+func (wrapper ServiceWrapper) DeleteRole(ctx context.Context, roleName string) error {
+	_, err := wrapper.IamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
+		RoleName: &roleName,
+	})
+	return err
+
 }
 func (wrapper ServiceWrapper) CheckRoleExists(roleName string) *string {
 	var role *types.Role
@@ -46,8 +37,8 @@ func (wrapper ServiceWrapper) CheckRoleExists(roleName string) *string {
 	} else {
 		role = result.Role
 	}
-	fmt.Println(*role.Arn)
-	fmt.Println(*role.AssumeRolePolicyDocument)
+	log.Println(*role.Arn)
+	log.Println(*role.AssumeRolePolicyDocument)
 	return role.Arn
 }
 func (wrapper ServiceWrapper) CreatePolicy(ctx context.Context, policyDocument string, policyName string) (*types.Policy, error) {
@@ -56,13 +47,14 @@ func (wrapper ServiceWrapper) CreatePolicy(ctx context.Context, policyDocument s
 		PolicyName:     aws.String(policyName),
 	})
 	if err != nil {
-		log.Fatalf("Couldn't create policy %v. Here's why: %v\n", policyName, err)
+		log.Printf("Couldn't create policy %v. Here's why: %v\n", policyName, err)
+		return nil, err
 
 	} else {
 		policy := result.Policy
 		return policy, nil
 	}
-	return nil, err
+
 }
 func (wrapper ServiceWrapper) AttachRolePolicy(ctx context.Context, policyArn string, roleName string) error {
 	_, err := wrapper.IamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
@@ -70,16 +62,18 @@ func (wrapper ServiceWrapper) AttachRolePolicy(ctx context.Context, policyArn st
 		RoleName:  aws.String(roleName),
 	})
 	if err != nil {
-		log.Fatalf("Couldn't attach policy %v to role %v. Here's why: %v\n", policyArn, roleName, err)
+		log.Printf("Couldn't attach policy %v to role %v. Here's why: %v\n", policyArn, roleName, err)
+
 	}
 	return err
 }
+
 func (wrapper ServiceWrapper) NewRole(ctx context.Context, roleName string, trustPolicy PolicyDocument) (*types.Role, error) {
 	var role *types.Role
 
 	policyBytes, err := json.Marshal(trustPolicy)
 	if err != nil {
-		log.Fatalf("Couldn't create trust policy for %v. Here's why: %v\n", trustPolicy, err)
+		log.Printf("Couldn't create trust policy for %v. Here's why: %v\n", trustPolicy, err)
 		return nil, err
 	}
 	result, err := wrapper.IamClient.CreateRole(ctx, &iam.CreateRoleInput{
@@ -101,7 +95,8 @@ func (wrapper ServiceWrapper) ListAttachedRolePolicies(ctx context.Context, role
 		RoleName: aws.String(roleName),
 	})
 	if err != nil {
-		log.Fatalf("Couldn't list attached policies for role %v. Here's why: %v\n", roleName, err)
+		log.Printf("Couldn't list attached policies for role %v. Here's why: %v\n", roleName, err)
+		return nil, err
 	} else {
 		policies = result.AttachedPolicies
 	}
@@ -119,7 +114,12 @@ func (wrapper ServiceWrapper) SetupPolicesAndAttachPolicy(ctx context.Context, r
 	}
 	return nil
 }
-func CreateRole(ctx context.Context, roleName string, rolePolicy string) (*string, error) {
+func Client(ctx context.Context) *iam.Client {
+	cfg, _ := config.LoadDefaultConfig(ctx)
+	iamClient := iam.NewFromConfig(cfg)
+	return iamClient
+}
+func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambda.DeployParams) (*string, error) {
 	cfg, _ := config.LoadDefaultConfig(ctx)
 	roleWrapper := ServiceWrapper{
 		IamClient: iam.NewFromConfig(cfg),
@@ -134,30 +134,74 @@ func CreateRole(ctx context.Context, roleName string, rolePolicy string) (*strin
 		}},
 	}
 
-	roleArn := roleWrapper.CheckRoleExists(roleName)
+	roleArn := roleWrapper.CheckRoleExists(lambdaParams.FunctionName)
 	if roleArn == nil {
 
-		role, err := roleWrapper.NewRole(ctx, roleName, trustPolicy)
+		role, err := roleWrapper.NewRole(ctx, lambdaParams.FunctionName, trustPolicy)
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
+			return nil, err
 		}
 
 		roleArn = role.Arn
 	}
 
-	//accountId := strings.Split(*roleArn, ":")[4]
-	policies, err := roleWrapper.ListAttachedRolePolicies(ctx, roleName)
+	accountId := strings.Split(*roleArn, ":")[4]
+	policies, err := roleWrapper.ListAttachedRolePolicies(ctx, lambdaParams.FunctionName)
 	if err != nil {
 
-		log.Fatal(err)
+		log.Println(err)
+		return nil, err
 	}
+	// To overwrite or not to overwrite the existing policy - going with not to overwrite
 	if len(policies) == 0 {
-		err := roleWrapper.SetupPolicesAndAttachPolicy(ctx, roleName, rolePolicy)
-		if err != nil {
-
-			log.Fatal(err)
+		if lambdaParams.AutogenerateExecutionPolicy {
+			err = AutoGenerateBasicPolicy(ctx, lambdaParams.FunctionName, accountId, roleWrapper)
+			if err != nil {
+				return nil, err
+			}
 		}
+		if strings.TrimSpace(lambdaParams.Policy) != "" {
+			err := roleWrapper.SetupPolicesAndAttachPolicy(ctx, lambdaParams.FunctionName, lambdaParams.Policy)
+			if err != nil {
+
+				log.Println(err)
+				return nil, err
+			}
+		}
+
 	}
 	return roleArn, nil
 
+}
+
+func AutoGenerateBasicPolicy(ctx context.Context, name string, accountId string, roleWrapper ServiceWrapper) error {
+	lambdaExecutionRolePolicy := `
+	{
+		"Version": "2012-10-17",
+		"Statement": [
+			{
+				"Effect": "Allow",
+				"Action": ["logs:CreateLogGroup"],
+				"Resource": "arn:aws:logs:us-east-1:` + accountId + `:*"
+			},
+			{
+				"Effect": "Allow",
+				"Action": [
+					"logs:CreateLogStream",
+					"logs:PutLogEvents"
+				],
+				"Resource": ["arn:aws:logs:us-east-1:` + accountId + `:log-group:/aws/lambda/` + name + `:*"]
+				
+			}
+		]
+	}
+`
+	err := roleWrapper.SetupPolicesAndAttachPolicy(ctx, name, lambdaExecutionRolePolicy)
+	if err != nil {
+
+		log.Println(err)
+
+	}
+	return err
 }

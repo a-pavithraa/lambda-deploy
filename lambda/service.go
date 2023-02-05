@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/a-pavithraa/lambda-deploy/common"
 	"log"
 	"os"
 	"strings"
@@ -32,8 +33,8 @@ func Client(ctx context.Context) *lambda.Client {
 
 }
 
-func (wrapper ServiceWrapper) DoesExist(ctx context.Context, name string) (bool, error) {
-	_, err := wrapper.Client.GetFunction(ctx, &lambda.GetFunctionInput{
+func (wrapper ServiceWrapper) GetFunctionDetails(ctx context.Context, name string) (*lambda.GetFunctionOutput, error) {
+	resp, err := wrapper.Client.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: &name,
 	})
 
@@ -42,38 +43,38 @@ func (wrapper ServiceWrapper) DoesExist(ctx context.Context, name string) (bool,
 		if errors.As(err, &apiErr) {
 			switch apiErr.(type) {
 			case *types.ResourceNotFoundException:
-				return false, nil
+				return nil, nil
 			default:
 				log.Fatalf("Unknown  error: %v\n", err)
+				return nil, err
 			}
 		}
 	}
 
-	return true, nil
+	return resp, nil
 
 }
 
-func CheckEmptyString(s string) bool {
-	return len(strings.TrimSpace(s)) == 0
-}
-
-func ValidateInputParamsForCreate(lambdaParams DeployParams) error {
+func ValidateInputParams(lambdaParams DeployParams, createFlag bool) error {
 	var errorMessage strings.Builder
-	if CheckEmptyString(lambdaParams.FunctionName) {
+	if common.TrimAndCheckEmptyString(&lambdaParams.FunctionName) {
 		errorMessage.WriteString("Function Name cannot be null.\n")
 	}
-	checkS3 := !CheckEmptyString(lambdaParams.BucketName) && !CheckEmptyString(lambdaParams.KeyName)
-	if !checkS3 && CheckEmptyString(lambdaParams.ZipFile) {
+	checkS3 := !common.TrimAndCheckEmptyString(&lambdaParams.BucketName) && !common.TrimAndCheckEmptyString(&lambdaParams.KeyName)
+	if !checkS3 && common.TrimAndCheckEmptyString(&lambdaParams.ZipFile) {
 		errorMessage.WriteString("Either S3 Bucket and Key or Zip file has to be included.\n")
 	}
-	if CheckEmptyString(lambdaParams.Runtime) {
-		errorMessage.WriteString("Runtime must be specified.\n")
+	if createFlag {
+		if common.TrimAndCheckEmptyString(&lambdaParams.Runtime) {
+			errorMessage.WriteString("Runtime must be specified.\n")
+		}
+		if common.TrimAndCheckEmptyString(&lambdaParams.HandlerName) {
+			errorMessage.WriteString("HandlerName must be specified.\n")
+		}
 	}
-	if CheckEmptyString(lambdaParams.HandlerName) {
-		errorMessage.WriteString("HandlerName must be specified.\n")
-	}
+
 	if len(errorMessage.String()) > 0 {
-		return &InputError{
+		return &common.InputError{
 			Message: errorMessage.String(),
 		}
 
@@ -81,9 +82,50 @@ func ValidateInputParamsForCreate(lambdaParams DeployParams) error {
 	return nil
 
 }
+func (wrapper ServiceWrapper) UpdateFunction(ctx context.Context, lambdaParams DeployParams) error {
+	functionInput := &lambda.UpdateFunctionCodeInput{
+		FunctionName: &lambdaParams.FunctionName,
+	}
 
-func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams) (*lambda.CreateFunctionOutput, error) {
-	roleArn, _ := iam.CreateRole(ctx, lambdaParams.FunctionName, lambdaParams.Policy)
+	if !common.TrimAndCheckEmptyString(&lambdaParams.BucketName) && !common.TrimAndCheckEmptyString(&lambdaParams.KeyName) {
+		functionInput.S3Bucket = &lambdaParams.BucketName
+		functionInput.S3Key = &lambdaParams.KeyName
+
+	}
+	if !common.TrimAndCheckEmptyString(&lambdaParams.ZipFile) {
+
+		contents, err := GetFunctionCodeFromZip(lambdaParams.ZipFile)
+		if err != nil {
+			log.Println(err)
+			return err
+		}
+		functionInput.ZipFile = contents
+	}
+	wrapper.Client.UpdateFunctionCode(ctx, functionInput)
+	return nil
+
+}
+
+func GetFunctionCodeFromZip(fileName string) ([]byte, error) {
+
+	zipFile, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	defer zipFile.Close()
+	zipFileInfo, _ := zipFile.Stat()
+	fileSize := zipFileInfo.Size()
+	fileBuffer := make([]byte, fileSize)
+	zipFile.Read(fileBuffer)
+
+	return fileBuffer, nil
+
+}
+
+func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams, iamWrapper iam.ServiceWrapper) (*lambda.CreateFunctionOutput, error) {
+
+	roleArn, _ := iamWrapper.CreateRole(ctx, lambdaParams)
 	memory := int32(lambdaParams.Memory)
 	functionInput := &lambda.CreateFunctionInput{
 
@@ -96,27 +138,24 @@ func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams
 	if lambdaParams.EnvironmentVariables != nil {
 		functionInput.Environment = &types.Environment{Variables: lambdaParams.EnvironmentVariables}
 	}
-	if !CheckEmptyString(lambdaParams.BucketName) && !CheckEmptyString(lambdaParams.KeyName) {
+	if !common.TrimAndCheckEmptyString(&lambdaParams.BucketName) && !common.TrimAndCheckEmptyString(&lambdaParams.KeyName) {
 		functionInput.Code = &types.FunctionCode{
 			S3Bucket: &lambdaParams.BucketName,
 			S3Key:    &lambdaParams.KeyName,
 		}
 
 	}
-	if !CheckEmptyString(lambdaParams.ZipFile) {
-		zipFile, err := os.Open(lambdaParams.ZipFile)
+	if !common.TrimAndCheckEmptyString(&lambdaParams.ZipFile) {
+
+		contents, err := GetFunctionCodeFromZip(lambdaParams.ZipFile)
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 			return nil, err
 		}
-		defer zipFile.Close()
-		zipFileInfo, _ := zipFile.Stat()
-		fileSize := zipFileInfo.Size()
-		fileBuffer := make([]byte, fileSize)
-		zipFile.Read(fileBuffer)
 		functionInput.Code = &types.FunctionCode{
-			ZipFile: fileBuffer,
+			ZipFile: contents,
 		}
+
 	}
 	output, err := wrapper.Client.CreateFunction(ctx, functionInput)
 	if err != nil {
@@ -125,4 +164,25 @@ func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams
 	}
 	fmt.Println(output)
 	return output, nil
+}
+func (wrapper ServiceWrapper) Delete(ctx context.Context, name string) (*lambda.GetFunctionOutput, error) {
+	functionDetails, err := wrapper.Client.GetFunction(ctx, &lambda.GetFunctionInput{
+		FunctionName: &name,
+	})
+	if err != nil {
+		log.Printf("Not able to delete the function. The reason is %s", err.Error())
+		return nil, err
+	}
+
+	_, err = wrapper.Client.DeleteFunction(ctx, &lambda.DeleteFunctionInput{
+		FunctionName: &name,
+	})
+
+	if err != nil {
+		log.Printf("Not able to delete the function. The reason is %s", err.Error())
+		return nil, err
+	}
+	log.Println(functionDetails)
+
+	return functionDetails, nil
 }
