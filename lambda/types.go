@@ -8,6 +8,7 @@ type DeployParams struct {
 	ZipFile                     string
 	EnvironmentVariables        map[string]string
 	Memory                      int
+	Timeout                     int
 	Policy                      string
 	Runtime                     string
 	HandlerName                 string

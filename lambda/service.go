@@ -127,6 +127,7 @@ func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams
 
 	roleArn, _ := iamWrapper.CreateRole(ctx, lambdaParams)
 	memory := int32(lambdaParams.Memory)
+	timeout := int32(lambdaParams.Timeout)
 	functionInput := &lambda.CreateFunctionInput{
 
 		FunctionName: &lambdaParams.FunctionName,
@@ -134,6 +135,7 @@ func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams
 		Runtime:      types.Runtime(lambdaParams.Runtime),
 		Handler:      &lambdaParams.HandlerName,
 		MemorySize:   &memory,
+		Timeout:      &timeout,
 	}
 	if lambdaParams.EnvironmentVariables != nil {
 		functionInput.Environment = &types.Environment{Variables: lambdaParams.EnvironmentVariables}

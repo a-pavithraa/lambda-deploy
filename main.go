@@ -91,6 +91,14 @@ func main() {
 				Usage:   "Memory of the Lambda function",
 			},
 		),
+		altsrc.NewIntFlag(
+			&cli.IntFlag{
+				Name:    "time_out",
+				Aliases: []string{"to"},
+				Value:   60,
+				Usage:   "Timeout of the Lambda function",
+			},
+		),
 		altsrc.NewStringFlag(
 			&cli.StringFlag{
 				Name:    "environment_variables",
@@ -221,6 +229,7 @@ func SetLambdaParams(cCtx *cli.Context) (*lambda.DeployParams, error) {
 		HandlerName:                 cCtx.String("handler_name"),
 		AutogenerateExecutionPolicy: cCtx.Bool("autogenerate_execution_policy"),
 		Action:                      cCtx.String("action_type"),
+		Timeout:                     cCtx.Int("time_out"),
 	}
 	envVariables := cCtx.String("environment_variables")
 
