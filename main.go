@@ -229,8 +229,9 @@ func UpdateFunctionConfiguration(lambdaWrapper lambda.ServiceWrapper, lambdaPara
 	// Not able to perform 2 updates in succession immediately . So retrying till it is successful
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	var err error
 	for {
-		err := lambdaWrapper.UpdateFunctionConfiguration(ctx, *lambdaParams)
+		err = lambdaWrapper.UpdateFunctionConfiguration(ctx, *lambdaParams)
 
 		if err != nil {
 
