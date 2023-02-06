@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/a-pavithraa/lambda-deploy/common"
 	"github.com/a-pavithraa/lambda-deploy/iam"
 	"github.com/a-pavithraa/lambda-deploy/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/smithy-go"
 	"github.com/urfave/cli/v2"
 	"github.com/urfave/cli/v2/altsrc"
 	"log"
 	"os"
+	"time"
 )
 
 func main() {
@@ -64,7 +68,7 @@ func main() {
 				Name:    "s3_bucket",
 				Aliases: []string{"s3"},
 				Value:   "",
-				Usage:   "Name of the Lambda function",
+				Usage:   "Name of the S3 bucket ",
 			},
 		),
 		altsrc.NewStringFlag(
@@ -72,7 +76,7 @@ func main() {
 				Name:    "s3_key",
 				Aliases: []string{"key"},
 				Value:   "",
-				Usage:   "Name of the Lambda function",
+				Usage:   "S3 Key",
 			},
 		),
 		altsrc.NewStringFlag(
@@ -80,7 +84,7 @@ func main() {
 				Name:    "zip_file",
 				Aliases: []string{"zip"},
 				Value:   "",
-				Usage:   "Name of the Lambda function",
+				Usage:   "Name of the Zip File",
 			},
 		),
 		altsrc.NewIntFlag(
@@ -112,15 +116,15 @@ func main() {
 				Name:    "region",
 				Aliases: []string{"r"},
 				Value:   "",
-				Usage:   "Environment variables of the Lambda function",
+				Usage:   "Region",
 			},
 		),
 		altsrc.NewStringFlag(
 			&cli.StringFlag{
-				Name:    "action_type",
-				Aliases: []string{"at"},
+				Name:    "role_arn",
+				Aliases: []string{"ra"},
 				Value:   "",
-				Usage:   "Action Type",
+				Usage:   "Role ARN",
 			},
 		),
 	}
@@ -173,12 +177,14 @@ func UpsertLambda(cCtx *cli.Context) error {
 	}
 
 	//fmt.Println(lambdaParams)
+
+	iamWrapper := iam.ServiceWrapper{
+		Client: iam.Client(context.Background()),
+	}
 	lambdaWrapper := lambda.ServiceWrapper{
 		Client: lambda.Client(context.Background()),
 	}
-	iamWrapper := iam.ServiceWrapper{
-		IamClient: iam.Client(context.Background()),
-	}
+
 	functionDetails, err := lambdaWrapper.GetFunctionDetails(context.Background(), lambdaParams.FunctionName)
 	if err != nil {
 		log.Println(err)
@@ -209,6 +215,9 @@ func UpsertLambda(cCtx *cli.Context) error {
 			log.Println(err)
 			return err
 		}
+		err = UpdateFunctionConfiguration(lambdaWrapper, lambdaParams)
+
+		return err
 
 	}
 
@@ -216,8 +225,37 @@ func UpsertLambda(cCtx *cli.Context) error {
 
 }
 
-func SetLambdaParams(cCtx *cli.Context) (*lambda.DeployParams, error) {
-	lambdaParams := lambda.DeployParams{
+func UpdateFunctionConfiguration(lambdaWrapper lambda.ServiceWrapper, lambdaParams *common.DeployParams) error {
+	// Not able to perform 2 updates in succession immediately . So retrying till it is successful
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for {
+		err := lambdaWrapper.UpdateFunctionConfiguration(ctx, *lambdaParams)
+
+		if err != nil {
+
+			var apiErr smithy.APIError
+			if errors.As(err, &apiErr) {
+				switch apiErr.(type) {
+				case *types.ResourceConflictException:
+					log.Println("Resource Conflict Exception. Not able to update")
+					time.Sleep(2 * time.Second)
+
+				default:
+					break
+
+				}
+			}
+		} else {
+			log.Println("Resource Updated successfully")
+			break
+		}
+	}
+	return err
+}
+
+func SetLambdaParams(cCtx *cli.Context) (*common.DeployParams, error) {
+	lambdaParams := common.DeployParams{
 		FunctionName:                cCtx.String("name"),
 		Policy:                      cCtx.String("policy"),
 		Runtime:                     cCtx.String("runtime"),
@@ -230,6 +268,7 @@ func SetLambdaParams(cCtx *cli.Context) (*lambda.DeployParams, error) {
 		AutogenerateExecutionPolicy: cCtx.Bool("autogenerate_execution_policy"),
 		Action:                      cCtx.String("action_type"),
 		Timeout:                     cCtx.Int("time_out"),
+		RoleArn:                     cCtx.String("role_arn"),
 	}
 	envVariables := cCtx.String("environment_variables")
 
@@ -258,6 +297,7 @@ func DeleteLambda(cCtx *cli.Context) error {
 	lambdaWrapper := lambda.ServiceWrapper{
 		Client: lambda.Client(context.Background()),
 	}
+
 	functionDetails, err := lambdaWrapper.Delete(context.Background(), name)
 	if err != nil {
 
@@ -265,10 +305,12 @@ func DeleteLambda(cCtx *cli.Context) error {
 	}
 	if common.TrimAndCheckEmptyString(&deleteRole) {
 		if deleteRole == "Y" {
-			iamWrapper := iam.ServiceWrapper{
-				IamClient: iam.Client(context.Background()),
+
+			wrapper := iam.ServiceWrapper{
+				Client: iam.Client(context.Background()),
 			}
-			iamWrapper.DeleteRole(context.Background(), *functionDetails.Configuration.Role)
+
+			wrapper.DeleteRole(context.Background(), *functionDetails.Configuration.Role)
 
 		}
 

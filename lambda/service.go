@@ -18,22 +18,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 )
 
-type Api interface {
-	GetFunction(ctx context.Context, params *lambda.GetFunctionInput, optFns ...func(options *lambda.Options)) (*lambda.GetFunctionOutput, error)
-}
-
-type ServiceWrapper struct {
-	Client *lambda.Client
-}
-
 func Client(ctx context.Context) *lambda.Client {
 	cfg, _ := config.LoadDefaultConfig(ctx)
 	lambdaClient := lambda.NewFromConfig(cfg)
+
 	return lambdaClient
 
 }
 
 func (wrapper ServiceWrapper) GetFunctionDetails(ctx context.Context, name string) (*lambda.GetFunctionOutput, error) {
+
 	resp, err := wrapper.Client.GetFunction(ctx, &lambda.GetFunctionInput{
 		FunctionName: &name,
 	})
@@ -55,7 +49,7 @@ func (wrapper ServiceWrapper) GetFunctionDetails(ctx context.Context, name strin
 
 }
 
-func ValidateInputParams(lambdaParams DeployParams, createFlag bool) error {
+func ValidateInputParams(lambdaParams common.DeployParams, createFlag bool) error {
 	var errorMessage strings.Builder
 	if common.TrimAndCheckEmptyString(&lambdaParams.FunctionName) {
 		errorMessage.WriteString("Function Name cannot be null.\n")
@@ -82,11 +76,37 @@ func ValidateInputParams(lambdaParams DeployParams, createFlag bool) error {
 	return nil
 
 }
-func (wrapper ServiceWrapper) UpdateFunction(ctx context.Context, lambdaParams DeployParams) error {
+func (wrapper ServiceWrapper) UpdateFunctionConfiguration(ctx context.Context, lambdaParams common.DeployParams) error {
+	log.Println("Updating Function Configuration-----")
+	configInput := &lambda.UpdateFunctionConfigurationInput{
+		FunctionName: &lambdaParams.FunctionName,
+	}
+	memory := int32(lambdaParams.Memory)
+	timeout := int32(lambdaParams.Timeout)
+	if memory > 0 {
+		configInput.MemorySize = &memory
+	}
+	if timeout > 0 {
+		configInput.Timeout = &timeout
+	}
+	if lambdaParams.EnvironmentVariables != nil {
+		configInput.Environment = &types.Environment{
+			Variables: lambdaParams.EnvironmentVariables,
+		}
+	}
+	if !common.TrimAndCheckEmptyString(&lambdaParams.RoleArn) {
+		configInput.Role = &lambdaParams.RoleArn
+	}
+	_, err := wrapper.Client.UpdateFunctionConfiguration(ctx, configInput)
+
+	return err
+}
+func (wrapper ServiceWrapper) UpdateFunction(ctx context.Context, lambdaParams common.DeployParams) error {
 	functionInput := &lambda.UpdateFunctionCodeInput{
 		FunctionName: &lambdaParams.FunctionName,
 	}
 
+	log.Println("Updating function--", lambdaParams.FunctionName)
 	if !common.TrimAndCheckEmptyString(&lambdaParams.BucketName) && !common.TrimAndCheckEmptyString(&lambdaParams.KeyName) {
 		functionInput.S3Bucket = &lambdaParams.BucketName
 		functionInput.S3Key = &lambdaParams.KeyName
@@ -101,16 +121,19 @@ func (wrapper ServiceWrapper) UpdateFunction(ctx context.Context, lambdaParams D
 		}
 		functionInput.ZipFile = contents
 	}
-	wrapper.Client.UpdateFunctionCode(ctx, functionInput)
-	return nil
+	_, err := wrapper.Client.UpdateFunctionCode(ctx, functionInput)
+	if err != nil {
+		log.Fatal(err)
 
+	}
+	return err
 }
 
 func GetFunctionCodeFromZip(fileName string) ([]byte, error) {
 
 	zipFile, err := os.Open(fileName)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return nil, err
 	}
 	defer zipFile.Close()
@@ -123,7 +146,7 @@ func GetFunctionCodeFromZip(fileName string) ([]byte, error) {
 
 }
 
-func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams DeployParams, iamWrapper iam.ServiceWrapper) (*lambda.CreateFunctionOutput, error) {
+func (wrapper ServiceWrapper) New(ctx context.Context, lambdaParams common.DeployParams, iamWrapper iam.ServiceWrapper) (*lambda.CreateFunctionOutput, error) {
 
 	roleArn, _ := iamWrapper.CreateRole(ctx, lambdaParams)
 	memory := int32(lambdaParams.Memory)

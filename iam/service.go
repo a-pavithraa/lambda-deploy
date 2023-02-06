@@ -3,7 +3,8 @@ package iam
 import (
 	"context"
 	"encoding/json"
-	"github.com/a-pavithraa/lambda-deploy/lambda"
+	"github.com/a-pavithraa/lambda-deploy/common"
+
 	"log"
 	"strings"
 
@@ -13,7 +14,31 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
 
-func (wrapper ServiceWrapper) validatePolicy(lambdaExecutionRolePolicy string) error {
+type Api interface {
+	DeleteRole(ctx context.Context, params *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error)
+	GetRole(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+	CreatePolicy(ctx context.Context, params *iam.CreatePolicyInput, optFns ...func(*iam.Options)) (*iam.CreatePolicyOutput, error)
+	AttachRolePolicy(ctx context.Context, params *iam.AttachRolePolicyInput, optFns ...func(*iam.Options)) (*iam.AttachRolePolicyOutput, error)
+	CreateRole(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
+	ListAttachedRolePolicies(ctx context.Context, params *iam.ListAttachedRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
+}
+type ServiceWrapper struct {
+	Client Api
+}
+type PolicyDocument struct {
+	Version   string
+	Statement []PolicyStatement
+}
+
+// PolicyStatement defines a statement in a policy document.
+type PolicyStatement struct {
+	Effect    string
+	Action    []string
+	Principal map[string]string `json:",omitempty"`
+	Resource  *string           `json:",omitempty"`
+}
+
+func validatePolicy(lambdaExecutionRolePolicy string) error {
 	lambdaBasicRole := PolicyDocument{}
 	if err := json.Unmarshal([]byte(lambdaExecutionRolePolicy), &lambdaBasicRole); err != nil {
 		return err
@@ -21,16 +46,17 @@ func (wrapper ServiceWrapper) validatePolicy(lambdaExecutionRolePolicy string) e
 	}
 	return nil
 }
+
 func (wrapper ServiceWrapper) DeleteRole(ctx context.Context, roleName string) error {
-	_, err := wrapper.IamClient.DeleteRole(ctx, &iam.DeleteRoleInput{
+	_, err := wrapper.Client.DeleteRole(ctx, &iam.DeleteRoleInput{
 		RoleName: &roleName,
 	})
 	return err
 
 }
-func (wrapper ServiceWrapper) CheckRoleExists(roleName string) *string {
+func (wrapper ServiceWrapper) CheckRoleExists(ctx context.Context, roleName string) *string {
 	var role *types.Role
-	result, err := wrapper.IamClient.GetRole(context.TODO(),
+	result, err := wrapper.Client.GetRole(ctx,
 		&iam.GetRoleInput{RoleName: aws.String(roleName)})
 	if err != nil {
 		return nil
@@ -38,11 +64,11 @@ func (wrapper ServiceWrapper) CheckRoleExists(roleName string) *string {
 		role = result.Role
 	}
 	log.Println(*role.Arn)
-	log.Println(*role.AssumeRolePolicyDocument)
+
 	return role.Arn
 }
 func (wrapper ServiceWrapper) CreatePolicy(ctx context.Context, policyDocument string, policyName string) (*types.Policy, error) {
-	result, err := wrapper.IamClient.CreatePolicy(context.TODO(), &iam.CreatePolicyInput{
+	result, err := wrapper.Client.CreatePolicy(ctx, &iam.CreatePolicyInput{
 		PolicyDocument: aws.String(policyDocument),
 		PolicyName:     aws.String(policyName),
 	})
@@ -57,7 +83,7 @@ func (wrapper ServiceWrapper) CreatePolicy(ctx context.Context, policyDocument s
 
 }
 func (wrapper ServiceWrapper) AttachRolePolicy(ctx context.Context, policyArn string, roleName string) error {
-	_, err := wrapper.IamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
+	_, err := wrapper.Client.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 		PolicyArn: aws.String(policyArn),
 		RoleName:  aws.String(roleName),
 	})
@@ -76,7 +102,7 @@ func (wrapper ServiceWrapper) NewRole(ctx context.Context, roleName string, trus
 		log.Printf("Couldn't create trust policy for %v. Here's why: %v\n", trustPolicy, err)
 		return nil, err
 	}
-	result, err := wrapper.IamClient.CreateRole(ctx, &iam.CreateRoleInput{
+	result, err := wrapper.Client.CreateRole(ctx, &iam.CreateRoleInput{
 		AssumeRolePolicyDocument: aws.String(string(policyBytes)),
 
 		RoleName: aws.String(roleName),
@@ -91,7 +117,7 @@ func (wrapper ServiceWrapper) NewRole(ctx context.Context, roleName string, trus
 }
 func (wrapper ServiceWrapper) ListAttachedRolePolicies(ctx context.Context, roleName string) ([]types.AttachedPolicy, error) {
 	var policies []types.AttachedPolicy
-	result, err := wrapper.IamClient.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{
+	result, err := wrapper.Client.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{
 		RoleName: aws.String(roleName),
 	})
 	if err != nil {
@@ -119,11 +145,7 @@ func Client(ctx context.Context) *iam.Client {
 	iamClient := iam.NewFromConfig(cfg)
 	return iamClient
 }
-func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambda.DeployParams) (*string, error) {
-	cfg, _ := config.LoadDefaultConfig(ctx)
-	roleWrapper := ServiceWrapper{
-		IamClient: iam.NewFromConfig(cfg),
-	}
+func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams common.DeployParams) (*string, error) {
 
 	trustPolicy := PolicyDocument{
 		Version: "2012-10-17",
@@ -134,10 +156,10 @@ func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambd
 		}},
 	}
 
-	roleArn := roleWrapper.CheckRoleExists(lambdaParams.FunctionName)
+	roleArn := wrapper.CheckRoleExists(ctx, lambdaParams.FunctionName)
 	if roleArn == nil {
 
-		role, err := roleWrapper.NewRole(ctx, lambdaParams.FunctionName, trustPolicy)
+		role, err := wrapper.NewRole(ctx, lambdaParams.FunctionName, trustPolicy)
 		if err != nil {
 			log.Println(err)
 			return nil, err
@@ -147,7 +169,7 @@ func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambd
 	}
 
 	accountId := strings.Split(*roleArn, ":")[4]
-	policies, err := roleWrapper.ListAttachedRolePolicies(ctx, lambdaParams.FunctionName)
+	policies, err := wrapper.ListAttachedRolePolicies(ctx, lambdaParams.FunctionName)
 	if err != nil {
 
 		log.Println(err)
@@ -156,13 +178,13 @@ func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambd
 	// To overwrite or not to overwrite the existing policy - going with not to overwrite
 	if len(policies) == 0 {
 		if lambdaParams.AutogenerateExecutionPolicy {
-			err = AutoGenerateBasicPolicy(ctx, lambdaParams.FunctionName, accountId, roleWrapper)
+			err = AutoGenerateBasicPolicy(ctx, lambdaParams.FunctionName, accountId, wrapper)
 			if err != nil {
 				return nil, err
 			}
 		}
 		if strings.TrimSpace(lambdaParams.Policy) != "" {
-			err := roleWrapper.SetupPolicesAndAttachPolicy(ctx, lambdaParams.FunctionName, lambdaParams.Policy)
+			err := wrapper.SetupPolicesAndAttachPolicy(ctx, lambdaParams.FunctionName, lambdaParams.Policy)
 			if err != nil {
 
 				log.Println(err)
@@ -175,7 +197,7 @@ func (wrapper ServiceWrapper) CreateRole(ctx context.Context, lambdaParams lambd
 
 }
 
-func AutoGenerateBasicPolicy(ctx context.Context, name string, accountId string, roleWrapper ServiceWrapper) error {
+func AutoGenerateBasicPolicy(ctx context.Context, name string, accountId string, wrapper ServiceWrapper) error {
 	lambdaExecutionRolePolicy := `
 	{
 		"Version": "2012-10-17",
@@ -197,7 +219,7 @@ func AutoGenerateBasicPolicy(ctx context.Context, name string, accountId string,
 		]
 	}
 `
-	err := roleWrapper.SetupPolicesAndAttachPolicy(ctx, name, lambdaExecutionRolePolicy)
+	err := wrapper.SetupPolicesAndAttachPolicy(ctx, name, lambdaExecutionRolePolicy)
 	if err != nil {
 
 		log.Println(err)
